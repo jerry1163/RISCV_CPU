@@ -1,0 +1,11 @@
+memory_initialization_radix = 16;
+memory_initialization_vector = 
+89ABCDEF,
+01010101,
+02020202,
+03030330,
+04040404,
+05050505,
+06060606,
+07070770,
+08080808;

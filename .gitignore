@@ -1,0 +1,35 @@
+# Vivado generated/cache files
+.Xil/
+*.jou
+*.log
+*.pb
+*.wdb
+*.wdf
+*.rpt
+*.rpx
+*.dcp
+*.vds
+*.vdi
+*.xml
+*.html
+
+RISCV_FPGA.cache/
+RISCV_FPGA.hw/
+RISCV_FPGA.ip_user_files/
+RISCV_FPGA.runs/
+RISCV_FPGA.sim/
+xsim.dir/
+
+# Generated reports / local artifacts
+*.aux
+*.out
+*.toc
+*.pdf
+dram_dump.txt
+webtalk*.backup.*
+xsim_*.backup.*
+
+# Python cache
+__pycache__/
+*.pyc
+
