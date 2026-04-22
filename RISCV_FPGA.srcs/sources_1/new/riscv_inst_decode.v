@@ -91,23 +91,33 @@ module riscv_inst_decode (
                 reg_wr_en_r        = 1'b1;
             end
 
-            // Load: lw
+            // Load: lb/lh/lw/lbu/lhu
             7'b0000011: begin
                 alu_opcode         = 2'b00; // address add
                 alu_src_b_is_imm_r = 1'b1;
                 reg_wr_src         = 2'b01; // Memory
                 reg_wr_en_r        = 1'b1;
                 mem_rd_en_r        = 1'b1;
-                mem_byte_mask      = 8'h0F; // low 4 bits valid (word)
                 ld_unsigned_r      = funct3[2];
+                case (funct3)
+                    3'b000, 3'b100: mem_byte_mask = 8'h01; // byte
+                    3'b001, 3'b101: mem_byte_mask = 8'h03; // half word
+                    3'b010:         mem_byte_mask = 8'h0F; // word
+                    default:        mem_byte_mask = 8'h00;
+                endcase
             end
 
-            // Store: sw
+            // Store: sb/sh/sw
             7'b0100011: begin
                 alu_opcode         = 2'b00; // address add
                 alu_src_b_is_imm_r = 1'b1;
                 mem_wr_en_r        = 1'b1;
-                mem_byte_mask      = 8'h0F; // low 4 bits valid (word)
+                case (funct3)
+                    3'b000:  mem_byte_mask = 8'h01; // byte
+                    3'b001:  mem_byte_mask = 8'h03; // half word
+                    3'b010:  mem_byte_mask = 8'h0F; // word
+                    default: mem_byte_mask = 8'h00;
+                endcase
             end
 
             // Branch: beq/blt/bltu/bge/bgeu (and bne-compatible encoding)
