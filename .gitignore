@@ -19,6 +19,13 @@ RISCV_FPGA.ip_user_files/
 RISCV_FPGA.runs/
 RISCV_FPGA.sim/
 xsim.dir/
+RISCV_FPGA.srcs/sources_1/ip/*/hdl/
+RISCV_FPGA.srcs/sources_1/ip/*/synth/
+RISCV_FPGA.srcs/sources_1/ip/**/*_ooc.xdc
+RISCV_FPGA.srcs/sources_1/ip/**/*_sim_netlist.*
+RISCV_FPGA.srcs/sources_1/ip/**/*_stub.*
+RISCV_FPGA.srcs/sources_1/ip/**/*.veo
+RISCV_FPGA.srcs/sources_1/ip/**/*.vho
 
 # Generated reports / local artifacts
 *.aux
@@ -32,4 +39,3 @@ xsim_*.backup.*
 # Python cache
 __pycache__/
 *.pyc
-
