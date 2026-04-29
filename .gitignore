@@ -1,40 +1,65 @@
-# Vivado generated/cache files
+# Vivado generated state
 .Xil/
 *.jou
 *.log
 *.pb
 *.wdb
-*.wdf
-*.rpt
-*.rpx
-*.dcp
-*.vds
-*.vdi
-*.xml
-*.html
+*.wcfg
+*.str
+*.zip
+*.backup.*
+webtalk*.jou
+webtalk*.log
 
+# Vivado project generated directories
 RISCV_FPGA.cache/
 RISCV_FPGA.hw/
-RISCV_FPGA.ip_user_files/
 RISCV_FPGA.runs/
 RISCV_FPGA.sim/
+RISCV_FPGA.ip_user_files/
 xsim.dir/
+__publish_RISCV_CPU/
+
+# Generated IP output products that can be recreated from .xci files
+RISCV_FPGA.srcs/sources_1/ip/*/doc/
 RISCV_FPGA.srcs/sources_1/ip/*/hdl/
+RISCV_FPGA.srcs/sources_1/ip/*/misc/
+RISCV_FPGA.srcs/sources_1/ip/*/simulation/
 RISCV_FPGA.srcs/sources_1/ip/*/synth/
 RISCV_FPGA.srcs/sources_1/ip/**/*_ooc.xdc
 RISCV_FPGA.srcs/sources_1/ip/**/*_sim_netlist.*
 RISCV_FPGA.srcs/sources_1/ip/**/*_stub.*
 RISCV_FPGA.srcs/sources_1/ip/**/*.veo
 RISCV_FPGA.srcs/sources_1/ip/**/*.vho
+RISCV_FPGA.srcs/sources_1/ip/**/*.xml
+RISCV_FPGA.srcs/sources_1/ip/clk_wiz_sys/mmcm_pll_drp_func*.vh
 
-# Generated reports / local artifacts
-*.aux
-*.out
-*.toc
-*.pdf
-dram_dump.txt
-webtalk*.backup.*
-xsim_*.backup.*
+# Generated implementation artifacts
+*.bit
+*.bin
+*.ltx
+*.dcp
+*.rpt
+*.rpx
+*.vdi
+*.wdf
+*.xdef
+*.xml.tmp
+
+# Simulator generated files
+xvlog.pb
+xvhdl.pb
+xelab.pb
+xsim*.jou
+xsim*.log
+simulate.log
+compile.log
+elaborate.log
+
+# OS/editor noise
+Thumbs.db
+desktop.ini
+.vscode/
 
 # Python cache
 __pycache__/

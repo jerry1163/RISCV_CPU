@@ -38,6 +38,10 @@ module riscv_cpu #(
     localparam REG_SRC_PC  = 2'b10;
     localparam REG_SRC_IMM = 2'b11;
 
+    localparam FWD_NONE   = 2'b00;
+    localparam FWD_EX_MEM = 2'b01;
+    localparam FWD_MEM_WB = 2'b10;
+
     // IF: request PC. The block RAM has one-cycle read latency, so the
     // instruction at inst belongs to imem_resp_pc.
     reg [bitwidth-1:0] pc = 0;
@@ -118,6 +122,8 @@ module riscv_cpu #(
     reg [bitwidth-1:0] id_ex_imm = 0;
     reg [bitwidth-1:0] id_ex_rs1_data = 0;
     reg [bitwidth-1:0] id_ex_rs2_data = 0;
+    reg [1:0]          id_ex_rs1_fwd_sel = FWD_NONE;
+    reg [1:0]          id_ex_rs2_fwd_sel = FWD_NONE;
 
     // EX/MEM pipeline register. Load data arrives from the RAM during this
     // stage and is captured into MEM/WB on the next clock edge.
@@ -198,19 +204,38 @@ module riscv_cpu #(
       ((id_uses_rs1 && (id_rs1_idx == id_ex_rd_idx)) ||
        (id_uses_rs2 && (id_rs2_idx == id_ex_rd_idx)));
 
-    wire ex_mem_can_forward =
-      ex_mem_valid && ex_mem_reg_wr_en && (ex_mem_rd_idx != 5'd0) &&
-      (ex_mem_reg_wr_src != REG_SRC_MEM);
+    wire id_ex_can_forward_next =
+      id_ex_valid && id_ex_reg_wr_en && (id_ex_rd_idx != 5'd0) &&
+      (id_ex_reg_wr_src != REG_SRC_MEM);
 
-    wire [bitwidth-1:0] ex_rs1_fwd =
-      (id_ex_rs1_idx == 5'd0) ? {bitwidth{1'b0}} :
-      ((ex_mem_can_forward && (ex_mem_rd_idx == id_ex_rs1_idx)) ? ex_mem_wb_data :
-      ((mem_wb_do_write && (mem_wb_rd_idx == id_ex_rs1_idx)) ? mem_wb_wb_data : id_ex_rs1_data));
+    wire ex_mem_can_forward_next =
+      ex_mem_valid && ex_mem_reg_wr_en && (ex_mem_rd_idx != 5'd0);
 
-    wire [bitwidth-1:0] ex_rs2_fwd =
-      (id_ex_rs2_idx == 5'd0) ? {bitwidth{1'b0}} :
-      ((ex_mem_can_forward && (ex_mem_rd_idx == id_ex_rs2_idx)) ? ex_mem_wb_data :
-      ((mem_wb_do_write && (mem_wb_rd_idx == id_ex_rs2_idx)) ? mem_wb_wb_data : id_ex_rs2_data));
+    wire [1:0] id_rs1_fwd_sel_next =
+      (!id_uses_rs1 || (id_rs1_idx == 5'd0)) ? FWD_NONE :
+      ((id_ex_can_forward_next && (id_ex_rd_idx == id_rs1_idx)) ? FWD_EX_MEM :
+      ((ex_mem_can_forward_next && (ex_mem_rd_idx == id_rs1_idx)) ? FWD_MEM_WB : FWD_NONE));
+
+    wire [1:0] id_rs2_fwd_sel_next =
+      (!id_uses_rs2 || (id_rs2_idx == 5'd0)) ? FWD_NONE :
+      ((id_ex_can_forward_next && (id_ex_rd_idx == id_rs2_idx)) ? FWD_EX_MEM :
+      ((ex_mem_can_forward_next && (ex_mem_rd_idx == id_rs2_idx)) ? FWD_MEM_WB : FWD_NONE));
+
+    reg [bitwidth-1:0] ex_rs1_fwd;
+    reg [bitwidth-1:0] ex_rs2_fwd;
+    always @(*) begin
+      case (id_ex_rs1_fwd_sel)
+        FWD_EX_MEM: ex_rs1_fwd = ex_mem_wb_data;
+        FWD_MEM_WB: ex_rs1_fwd = mem_wb_wb_data;
+        default:    ex_rs1_fwd = id_ex_rs1_data;
+      endcase
+
+      case (id_ex_rs2_fwd_sel)
+        FWD_EX_MEM: ex_rs2_fwd = ex_mem_wb_data;
+        FWD_MEM_WB: ex_rs2_fwd = mem_wb_wb_data;
+        default:    ex_rs2_fwd = id_ex_rs2_data;
+      endcase
+    end
 
     wire [bitwidth-1:0] ex_alu_din_b = id_ex_alu_src_b_is_imm ? id_ex_imm : ex_rs2_fwd;
     wire [bitwidth-1:0] ex_alu_dout;
@@ -225,6 +250,8 @@ module riscv_cpu #(
       .dout(ex_alu_dout),
       .zero_flag(ex_alu_zero_flag)
     );
+
+    wire [bitwidth-1:0] ex_mem_addr_calc = ex_rs1_fwd + id_ex_imm;
 
     wire signed [bitwidth-1:0] ex_rs1_signed = ex_rs1_fwd;
     wire signed [bitwidth-1:0] ex_rs2_signed = ex_rs2_fwd;
@@ -268,7 +295,7 @@ module riscv_cpu #(
 
       case (id_ex_mem_byte_mask[3:0])
         4'b0001: begin
-          case (ex_alu_dout[1:0])
+          case (ex_mem_addr_calc[1:0])
             2'b00: begin
               ex_store_data_aligned = {{24{1'b0}}, ex_rs2_fwd[7:0]};
               ex_store_byte_mask = 4'b0001;
@@ -289,7 +316,7 @@ module riscv_cpu #(
         end
 
         4'b0011: begin
-          if (ex_alu_dout[1]) begin
+          if (ex_mem_addr_calc[1]) begin
             ex_store_data_aligned = {ex_rs2_fwd[15:0], {16{1'b0}}};
             ex_store_byte_mask = 4'b1100;
           end
@@ -375,6 +402,8 @@ module riscv_cpu #(
         id_ex_imm <= {bitwidth{1'b0}};
         id_ex_rs1_data <= {bitwidth{1'b0}};
         id_ex_rs2_data <= {bitwidth{1'b0}};
+        id_ex_rs1_fwd_sel <= FWD_NONE;
+        id_ex_rs2_fwd_sel <= FWD_NONE;
 
         ex_mem_valid <= 1'b0;
         ex_mem_rd_idx <= 5'd0;
@@ -408,7 +437,7 @@ module riscv_cpu #(
         ex_mem_mem_rd_en <= id_ex_valid && id_ex_mem_rd_en;
         ex_mem_mem_byte_mask <= id_ex_mem_byte_mask;
         ex_mem_ld_unsigned <= id_ex_ld_unsigned;
-        ex_mem_addr_low <= ex_alu_dout[1:0];
+        ex_mem_addr_low <= ex_mem_addr_calc[1:0];
         ex_mem_wb_data <= ex_wb_data;
 
         if (ex_flush) begin
@@ -424,6 +453,8 @@ module riscv_cpu #(
           id_ex_mem_wr_en <= 1'b0;
           id_ex_mem_rd_en <= 1'b0;
           id_ex_branch_opcode <= 5'd0;
+          id_ex_rs1_fwd_sel <= FWD_NONE;
+          id_ex_rs2_fwd_sel <= FWD_NONE;
         end
         else if (load_use_stall) begin
           pc <= pc;
@@ -445,6 +476,8 @@ module riscv_cpu #(
           id_ex_mem_wr_en <= 1'b0;
           id_ex_mem_rd_en <= 1'b0;
           id_ex_branch_opcode <= 5'd0;
+          id_ex_rs1_fwd_sel <= FWD_NONE;
+          id_ex_rs2_fwd_sel <= FWD_NONE;
         end
         else begin
           pc <= pc + 4;
@@ -479,6 +512,8 @@ module riscv_cpu #(
           id_ex_imm <= id_imm;
           id_ex_rs1_data <= id_rs1_data;
           id_ex_rs2_data <= id_rs2_data;
+          id_ex_rs1_fwd_sel <= id_rs1_fwd_sel_next;
+          id_ex_rs2_fwd_sel <= id_rs2_fwd_sel_next;
         end
       end
     end
@@ -487,7 +522,7 @@ module riscv_cpu #(
 
     assign data_bram_rd_en = id_ex_valid && id_ex_mem_rd_en;
     assign data_bram_wr_en = id_ex_valid && id_ex_mem_wr_en;
-    assign data_bram_addr = (data_bram_rd_en || data_bram_wr_en) ? ex_alu_dout : {bitwidth{1'b0}};
+    assign data_bram_addr = (data_bram_rd_en || data_bram_wr_en) ? ex_mem_addr_calc : {bitwidth{1'b0}};
     assign data_bram_wr_data = ex_store_data_aligned;
     assign data_bram_wr_byte_mask = data_bram_wr_en ? ex_store_byte_mask : 4'b0000;
 

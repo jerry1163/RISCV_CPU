@@ -37,7 +37,6 @@ module riscv_mcu_tdpram_top#(
       .clk_in1(CLK_FPGA)     // input clk_in1
     );
     
-    localparam data_bram_addr_hi = 32'h000FFFFF;
     wire [bitwidth-1:0] inst_bram_rd_data;
     wire [bitwidth-1:0] inst_bram_addr;
     reg [bitwidth-1:0] data_bram_rd_data;
@@ -59,23 +58,25 @@ module riscv_mcu_tdpram_top#(
       .data_bram_wr_en(data_bram_wr_en),
       .data_bram_rd_en(data_bram_rd_en)
     );
-    assign data_bram_wr_byte_mask_mux = (data_bram_addr < data_bram_addr_hi) ? data_bram_wr_byte_mask : 4'b0000;
+    wire data_bram_addr_is_ram = (data_bram_addr[bitwidth-1:20] == 12'h000);
+    assign data_bram_wr_byte_mask_mux = data_bram_addr_is_ram ? data_bram_wr_byte_mask : 4'b0000;
     wire inst_bram_wr_en;
     wire [31:0] inst_wr_data;
     wire [bitwidth-1:0] data_bram_dout;
     assign inst_bram_wr_en = 0;
+    assign inst_wr_data = 32'b0;
     
     tdp_bram tdp_bram_inst (
       .clka(clk_cpu),    // input wire clka
       .ena(1'b1),      // input wire ena
-      .wea(inst_bram_wr_en),      // input wire [3 : 0] wea
-      .addra(inst_bram_addr[bitwidth-1:2]),  // input wire [14 : 0] addra
+      .wea({4{inst_bram_wr_en}}),      // input wire [3 : 0] wea
+      .addra(inst_bram_addr[16:2]),  // input wire [14 : 0] addra
       .dina(inst_wr_data),    // input wire [31 : 0] dina
       .douta(inst_bram_rd_data),  // output wire [31 : 0] douta
       .clkb(clk_cpu),    // input wire clkb
       .enb(1'b1),      // input wire enb
       .web(data_bram_wr_byte_mask_mux),      // input wire [3 : 0] web
-      .addrb(data_bram_addr[bitwidth-1:2]),  // input wire [14 : 0] addrb
+      .addrb(data_bram_addr[16:2]),  // input wire [14 : 0] addrb
       .dinb(data_bram_wr_data),    // input wire [31 : 0] dinb
       .doutb(data_bram_dout)  // output wire [31 : 0] doutb
     );
