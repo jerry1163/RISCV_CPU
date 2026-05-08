@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python riscv_single_cycle_sim.py --pipeline --max-cycles 150)",
+      "Bash(git remote *)",
+      "Bash(git config *)"
+    ]
+  }
+}
