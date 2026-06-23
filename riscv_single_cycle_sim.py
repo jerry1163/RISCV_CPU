@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Small RV32I single-cycle simulator for this project.
+"""Small RV32IM single-cycle simulator for this project.
 
 The code is intentionally organized like the Verilog datapath:
 fetch -> decode/imm -> execute/branch -> memory -> write-back.
 
-It supports the RV32I subset used by test6/test7:
+It supports the RV32I subset used by test6/test7 plus RV32M:
 R-type ALU, I-type ALU, loads/stores of byte/half/word, branches,
-jal/jalr, lui, and auipc.
+jal/jalr, lui, auipc, multiply, divide, and remainder.
 """
 
 from __future__ import annotations
@@ -64,15 +64,91 @@ STORE_NAMES = {"sb", "sh", "sw"}
 BRANCH_NAMES = {"beq", "bne", "blt", "bge", "bltu", "bgeu"}
 R_ALU_NAMES = {"add", "sub", "sll", "slt", "sltu", "xor", "srl", "sra", "or", "and"}
 I_ALU_NAMES = {"addi", "slti", "sltiu", "xori", "ori", "andi", "slli", "srli", "srai"}
+M_ALU_NAMES = {"mul", "mulh", "mulhsu", "mulhu", "div", "divu", "rem", "remu"}
 
 
 def instruction_sources(dec: "DecodedInstruction") -> Tuple[int, ...]:
     """Return the register source indexes really consumed by an instruction."""
-    if dec.name in R_ALU_NAMES or dec.name in STORE_NAMES or dec.name in BRANCH_NAMES:
+    if dec.name in R_ALU_NAMES or dec.name in M_ALU_NAMES or dec.name in STORE_NAMES or dec.name in BRANCH_NAMES:
         return dec.rs1, dec.rs2
     if dec.name in I_ALU_NAMES or dec.name in LOAD_NAMES or dec.name == "jalr":
         return (dec.rs1,)
     return ()
+
+
+def trunc_div_signed(a: int, b: int) -> int:
+    q = abs(a) // abs(b)
+    return -q if (a < 0) ^ (b < 0) else q
+
+
+def execute_alu_result(name: str, a: int, b: int, imm: int) -> Optional[int]:
+    a = u32(a)
+    b = u32(b)
+
+    if name == "add":
+        return u32(a + b)
+    if name == "sub":
+        return u32(a - b)
+    if name == "sll":
+        return u32(a << (b & 0x1F))
+    if name == "slt":
+        return 1 if s32(a) < s32(b) else 0
+    if name == "sltu":
+        return 1 if a < b else 0
+    if name == "xor":
+        return u32(a ^ b)
+    if name == "srl":
+        return u32(a >> (b & 0x1F))
+    if name == "sra":
+        return u32(s32(a) >> (b & 0x1F))
+    if name == "or":
+        return u32(a | b)
+    if name == "and":
+        return u32(a & b)
+
+    if name == "addi":
+        return u32(a + imm)
+    if name == "slti":
+        return 1 if s32(a) < imm else 0
+    if name == "sltiu":
+        return 1 if a < u32(imm) else 0
+    if name == "xori":
+        return u32(a ^ u32(imm))
+    if name == "ori":
+        return u32(a | u32(imm))
+    if name == "andi":
+        return u32(a & u32(imm))
+    if name == "slli":
+        return u32(a << imm)
+    if name == "srli":
+        return u32(a >> imm)
+    if name == "srai":
+        return u32(s32(a) >> imm)
+
+    if name == "mul":
+        return u32(a * b)
+    if name == "mulh":
+        return u32((s32(a) * s32(b)) >> 32)
+    if name == "mulhsu":
+        return u32((s32(a) * b) >> 32)
+    if name == "mulhu":
+        return u32((a * b) >> 32)
+
+    if name in {"div", "rem"}:
+        sa = s32(a)
+        sb = s32(b)
+        if b == 0:
+            return MASK32 if name == "div" else a
+        if a == 0x80000000 and b == MASK32:
+            return 0x80000000 if name == "div" else 0
+        q = trunc_div_signed(sa, sb)
+        return u32(q if name == "div" else sa - q * sb)
+    if name == "divu":
+        return MASK32 if b == 0 else u32(a // b)
+    if name == "remu":
+        return a if b == 0 else u32(a % b)
+
+    return None
 
 
 @dataclass
@@ -316,6 +392,14 @@ class RiscVSingleCycleSim:
                 (0b101, 0x20): "sra",
                 (0b110, 0x00): "or",
                 (0b111, 0x00): "and",
+                (0b000, 0x01): "mul",
+                (0b001, 0x01): "mulh",
+                (0b010, 0x01): "mulhsu",
+                (0b011, 0x01): "mulhu",
+                (0b100, 0x01): "div",
+                (0b101, 0x01): "divu",
+                (0b110, 0x01): "rem",
+                (0b111, 0x01): "remu",
             }
             name = r_names.get((funct3, funct7), "unknown")
         elif opcode == 0x73:
@@ -325,7 +409,7 @@ class RiscVSingleCycleSim:
 
     def format_asm(self, dec: DecodedInstruction, pc: int) -> str:
         n = dec.name
-        if n in {"add", "sub", "sll", "slt", "sltu", "xor", "srl", "sra", "or", "and"}:
+        if n in R_ALU_NAMES or n in M_ALU_NAMES:
             return f"{n} {reg_name(dec.rd)}, {reg_name(dec.rs1)}, {reg_name(dec.rs2)}"
         if n in {"addi", "slti", "sltiu", "xori", "ori", "andi"}:
             return f"{n} {reg_name(dec.rd)}, {reg_name(dec.rs1)}, {dec.imm}"
@@ -350,52 +434,7 @@ class RiscVSingleCycleSim:
         return f"unknown 0x{dec.inst:08x}"
 
     def execute_alu(self, dec: DecodedInstruction) -> Optional[int]:
-        a = self.regs[dec.rs1]
-        b = self.regs[dec.rs2]
-        imm = dec.imm
-        n = dec.name
-
-        if n == "add":
-            return u32(a + b)
-        if n == "sub":
-            return u32(a - b)
-        if n == "sll":
-            return u32(a << (b & 0x1F))
-        if n == "slt":
-            return 1 if s32(a) < s32(b) else 0
-        if n == "sltu":
-            return 1 if a < b else 0
-        if n == "xor":
-            return u32(a ^ b)
-        if n == "srl":
-            return u32(a >> (b & 0x1F))
-        if n == "sra":
-            return u32(s32(a) >> (b & 0x1F))
-        if n == "or":
-            return u32(a | b)
-        if n == "and":
-            return u32(a & b)
-
-        if n == "addi":
-            return u32(a + imm)
-        if n == "slti":
-            return 1 if s32(a) < imm else 0
-        if n == "sltiu":
-            return 1 if a < u32(imm) else 0
-        if n == "xori":
-            return u32(a ^ u32(imm))
-        if n == "ori":
-            return u32(a | u32(imm))
-        if n == "andi":
-            return u32(a & u32(imm))
-        if n == "slli":
-            return u32(a << imm)
-        if n == "srli":
-            return u32(a >> imm)
-        if n == "srai":
-            return u32(s32(a) >> imm)
-
-        return None
+        return execute_alu_result(dec.name, self.regs[dec.rs1], self.regs[dec.rs2], dec.imm)
 
     def branch_taken(self, dec: DecodedInstruction) -> bool:
         a = self.regs[dec.rs1]
@@ -529,7 +568,7 @@ class RiscVSingleCycleSim:
 
 
 class RiscVPipelineSim(RiscVSingleCycleSim):
-    """Five-stage pipeline simulator with forwarding, stall, static prediction, and flush logic."""
+    """Five-stage pipeline simulator with forwarding, stall, MDU stall, and EX-stage flush logic."""
 
     def __init__(
         self,
@@ -546,15 +585,23 @@ class RiscVPipelineSim(RiscVSingleCycleSim):
         self.halt_pending = False
         self.halt_marker_committed = False
         self.self_loop_pc: Optional[int] = None
+        self.mdu_active = False
+        self.mdu_remaining = 0
+        self.mdu_result = 0
 
     @staticmethod
     def predict_taken(dec: "DecodedInstruction") -> bool:
-        """Static prediction: backward branches and JAL predict taken."""
-        if dec.name == "jal":
-            return True
-        if dec.name in BRANCH_NAMES and dec.imm < 0:
-            return True
+        """Current RTL fetches sequentially and resolves control flow in EX."""
         return False
+
+    @staticmethod
+    def mdu_stall_cycles(dec: "DecodedInstruction", a: int, b: int) -> int:
+        if dec.name in {"div", "rem"}:
+            if b == 0 or (u32(a) == 0x80000000 and u32(b) == MASK32):
+                return 1
+        if dec.name in {"divu", "remu"} and b == 0:
+            return 1
+        return 33
 
     def pipe_reg_writes(self, reg: PipeReg) -> bool:
         return bool(reg.valid and reg.dec and reg.dec.writes_rd and reg.dec.rd != 0)
@@ -568,50 +615,7 @@ class RiscVPipelineSim(RiscVSingleCycleSim):
         return f"pc=0x{reg.pc:08x} {reg.asm}"
 
     def execute_alu_values(self, dec: DecodedInstruction, a: int, b: int) -> Optional[int]:
-        imm = dec.imm
-        n = dec.name
-
-        if n == "add":
-            return u32(a + b)
-        if n == "sub":
-            return u32(a - b)
-        if n == "sll":
-            return u32(a << (b & 0x1F))
-        if n == "slt":
-            return 1 if s32(a) < s32(b) else 0
-        if n == "sltu":
-            return 1 if a < b else 0
-        if n == "xor":
-            return u32(a ^ b)
-        if n == "srl":
-            return u32(a >> (b & 0x1F))
-        if n == "sra":
-            return u32(s32(a) >> (b & 0x1F))
-        if n == "or":
-            return u32(a | b)
-        if n == "and":
-            return u32(a & b)
-
-        if n == "addi":
-            return u32(a + imm)
-        if n == "slti":
-            return 1 if s32(a) < imm else 0
-        if n == "sltiu":
-            return 1 if a < u32(imm) else 0
-        if n == "xori":
-            return u32(a ^ u32(imm))
-        if n == "ori":
-            return u32(a | u32(imm))
-        if n == "andi":
-            return u32(a & u32(imm))
-        if n == "slli":
-            return u32(a << imm)
-        if n == "srli":
-            return u32(a >> imm)
-        if n == "srai":
-            return u32(s32(a) >> imm)
-
-        return None
+        return execute_alu_result(dec.name, a, b, dec.imm)
 
     def branch_taken_values(self, dec: DecodedInstruction, a: int, b: int) -> bool:
         if dec.name == "beq":
@@ -742,6 +746,7 @@ class RiscVPipelineSim(RiscVSingleCycleSim):
         mispredict_target = u32(self.pc + 4)
         forward_a = "REG"
         forward_b = "REG"
+        mdu_stall = False
 
         if self.id_ex.valid and self.id_ex.dec:
             dec = self.id_ex.dec
@@ -763,7 +768,19 @@ class RiscVPipelineSim(RiscVSingleCycleSim):
             halt_after = False
             ex_take_branch = False
 
-            if dec.name == "lui":
+            if dec.name in M_ALU_NAMES:
+                if not self.mdu_active:
+                    self.mdu_result = self.execute_alu_values(dec, a, b) or 0
+                    self.mdu_remaining = self.mdu_stall_cycles(dec, a, b)
+                    self.mdu_active = True
+
+                if self.mdu_remaining > 0:
+                    self.mdu_remaining -= 1
+                    mdu_stall = True
+                else:
+                    wb_value = self.mdu_result
+                    self.mdu_active = False
+            elif dec.name == "lui":
                 wb_value = u32(dec.imm)
             elif dec.name == "auipc":
                 wb_value = u32(self.id_ex.pc + dec.imm)
@@ -784,10 +801,12 @@ class RiscVPipelineSim(RiscVSingleCycleSim):
             if dec.name not in LOAD_NAMES and dec.name not in STORE_NAMES:
                 alu_result = wb_value
 
-            # Mispredict: EX result differs from ID prediction.
-            # JAL is always predicted taken -> never mispredicts.
-            # JALR is always predicted not-taken but always taken -> always mispredicts.
-            if dec.name == "jalr":
+            if mdu_stall:
+                next_ex_mem = PipeReg()
+            elif dec.name == "jal":
+                mispredict = True
+                mispredict_target = u32(self.id_ex.pc + dec.imm)
+            elif dec.name == "jalr":
                 mispredict = True
                 mispredict_target = u32((a + dec.imm) & ~1)
             elif dec.name in BRANCH_NAMES:
@@ -803,18 +822,19 @@ class RiscVPipelineSim(RiscVSingleCycleSim):
                 self.self_loop_pc = self.id_ex.pc
                 halt_after = True
 
-            next_ex_mem = PipeReg(
-                valid=True,
-                pc=self.id_ex.pc,
-                inst=self.id_ex.inst,
-                dec=dec,
-                asm=self.id_ex.asm,
-                alu_result=alu_result,
-                store_data=u32(store_data),
-                wb_value=u32(wb_value),
-                halt_after=halt_after,
-                predict_taken=self.id_ex.predict_taken,
-            )
+            if not mdu_stall:
+                next_ex_mem = PipeReg(
+                    valid=True,
+                    pc=self.id_ex.pc,
+                    inst=self.id_ex.inst,
+                    dec=dec,
+                    asm=self.id_ex.asm,
+                    alu_result=alu_result,
+                    store_data=u32(store_data),
+                    wb_value=u32(wb_value),
+                    halt_after=halt_after,
+                    predict_taken=self.id_ex.predict_taken,
+                )
 
         stall = self.load_use_stall()
 
@@ -826,13 +846,19 @@ class RiscVPipelineSim(RiscVSingleCycleSim):
             if id_pred_taken:
                 id_pred_target = u32(self.if_id.pc + self.if_id.dec.imm)
 
-        # PC / pipeline update: mispredict > predict > stall > normal
+        # PC / pipeline update: mispredict > MDU stall > predict > load-use stall > normal
         if mispredict:
             next_id_ex = PipeReg()
             next_if_id = PipeReg()
             next_pc = mispredict_target
             flush = True
             stall_flag = False
+        elif mdu_stall:
+            next_id_ex = self.id_ex
+            next_if_id = self.if_id
+            next_pc = self.pc
+            flush = False
+            stall_flag = True
         elif id_pred_taken and not stall:
             # Predict taken: redirect fetch to target, flush the sequential
             # instruction that was just fetched, advance branch to EX.
@@ -949,7 +975,7 @@ def print_pipe_trace(history: List[PipelineCycleInfo]) -> None:
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run the project RV32I single-cycle Python simulator.")
+    parser = argparse.ArgumentParser(description="Run the project RV32IM Python simulator.")
     parser.add_argument("--tdp", type=Path, default=Path("test7_tdp.coe"), help="unified instruction/data COE")
     parser.add_argument("--inst", type=Path, help="split instruction COE")
     parser.add_argument("--data", type=Path, help="split data COE")

@@ -119,6 +119,8 @@ module riscv_cpu #(
     reg                id_ex_pc_gen_src = 0;
     reg [7:0]          id_ex_mem_byte_mask = 0;
     reg                id_ex_ld_unsigned = 0;
+    reg                id_ex_is_mdu = 0;
+    reg [2:0]          id_ex_mdu_op = 0;
     reg [bitwidth-1:0] id_ex_imm = 0;
     reg [bitwidth-1:0] id_ex_rs1_data = 0;
     reg [bitwidth-1:0] id_ex_rs2_data = 0;
@@ -199,6 +201,15 @@ module riscv_cpu #(
        (id_opcode == 7'b0100011) || // store data
        (id_opcode == 7'b1100011));  // branch
 
+    wire id_is_mdu =
+      if_id_valid && (id_opcode == 7'b0110011) && (id_funct7 == 7'b0000001);
+
+    wire mdu_start;
+    wire mdu_busy;
+    wire mdu_done;
+    wire [bitwidth-1:0] mdu_result;
+    wire mdu_stall;
+
     wire load_use_stall =
       id_ex_valid && id_ex_mem_rd_en && (id_ex_rd_idx != 5'd0) &&
       ((id_uses_rs1 && (id_rs1_idx == id_ex_rd_idx)) ||
@@ -206,7 +217,8 @@ module riscv_cpu #(
 
     wire id_ex_can_forward_next =
       id_ex_valid && id_ex_reg_wr_en && (id_ex_rd_idx != 5'd0) &&
-      (id_ex_reg_wr_src != REG_SRC_MEM);
+      (id_ex_reg_wr_src != REG_SRC_MEM) &&
+      (!id_ex_is_mdu || mdu_done);
 
     wire ex_mem_can_forward_next =
       ex_mem_valid && ex_mem_reg_wr_en && (ex_mem_rd_idx != 5'd0);
@@ -251,6 +263,23 @@ module riscv_cpu #(
       .zero_flag(ex_alu_zero_flag)
     );
 
+    assign mdu_start = id_ex_valid && id_ex_is_mdu && !mdu_busy && !mdu_done;
+    assign mdu_stall = id_ex_valid && id_ex_is_mdu && !mdu_done;
+
+    riscv_mdu #(
+      .bitwidth(bitwidth)
+    ) riscv_mdu_inst (
+      .clk(clk),
+      .rst_n(rst_n),
+      .start(mdu_start),
+      .op(id_ex_mdu_op),
+      .din_a(ex_rs1_fwd),
+      .din_b(ex_rs2_fwd),
+      .busy(mdu_busy),
+      .done(mdu_done),
+      .result(mdu_result)
+    );
+
     wire [bitwidth-1:0] ex_mem_addr_calc = ex_rs1_fwd + id_ex_imm;
 
     wire signed [bitwidth-1:0] ex_rs1_signed = ex_rs1_fwd;
@@ -283,7 +312,7 @@ module riscv_cpu #(
         REG_SRC_PC:  ex_wb_data = id_ex_pc_gen_src ? (id_ex_pc + id_ex_imm) : (id_ex_pc + 4);
         REG_SRC_IMM: ex_wb_data = id_ex_imm;
         REG_SRC_MEM: ex_wb_data = {bitwidth{1'b0}};
-        default:     ex_wb_data = ex_alu_dout;
+        default:     ex_wb_data = id_ex_is_mdu ? mdu_result : ex_alu_dout;
       endcase
     end
 
@@ -399,6 +428,8 @@ module riscv_cpu #(
         id_ex_pc_gen_src <= 1'b0;
         id_ex_mem_byte_mask <= 8'd0;
         id_ex_ld_unsigned <= 1'b0;
+        id_ex_is_mdu <= 1'b0;
+        id_ex_mdu_op <= 3'd0;
         id_ex_imm <= {bitwidth{1'b0}};
         id_ex_rs1_data <= {bitwidth{1'b0}};
         id_ex_rs2_data <= {bitwidth{1'b0}};
@@ -453,8 +484,33 @@ module riscv_cpu #(
           id_ex_mem_wr_en <= 1'b0;
           id_ex_mem_rd_en <= 1'b0;
           id_ex_branch_opcode <= 5'd0;
+          id_ex_is_mdu <= 1'b0;
+          id_ex_mdu_op <= 3'd0;
           id_ex_rs1_fwd_sel <= FWD_NONE;
           id_ex_rs2_fwd_sel <= FWD_NONE;
+        end
+        else if (mdu_stall) begin
+          pc <= pc;
+          imem_resp_pc <= pc;
+          imem_resp_valid <= 1'b1;
+
+          if (!fetch_buf_valid && imem_resp_valid) begin
+            fetch_buf_valid <= 1'b1;
+            fetch_buf_pc <= imem_resp_pc;
+            fetch_buf_inst <= inst;
+          end
+
+          if_id_valid <= if_id_valid;
+          if_id_pc <= if_id_pc;
+          if_id_inst <= if_id_inst;
+
+          ex_mem_valid <= 1'b0;
+          ex_mem_reg_wr_en <= 1'b0;
+          ex_mem_mem_rd_en <= 1'b0;
+          ex_mem_mem_byte_mask <= 8'd0;
+          ex_mem_ld_unsigned <= 1'b0;
+          ex_mem_addr_low <= 2'd0;
+          ex_mem_wb_data <= {bitwidth{1'b0}};
         end
         else if (load_use_stall) begin
           pc <= pc;
@@ -476,6 +532,8 @@ module riscv_cpu #(
           id_ex_mem_wr_en <= 1'b0;
           id_ex_mem_rd_en <= 1'b0;
           id_ex_branch_opcode <= 5'd0;
+          id_ex_is_mdu <= 1'b0;
+          id_ex_mdu_op <= 3'd0;
           id_ex_rs1_fwd_sel <= FWD_NONE;
           id_ex_rs2_fwd_sel <= FWD_NONE;
         end
@@ -509,6 +567,8 @@ module riscv_cpu #(
           id_ex_pc_gen_src <= id_pc_gen_src;
           id_ex_mem_byte_mask <= id_mem_byte_mask;
           id_ex_ld_unsigned <= id_ld_unsigned;
+          id_ex_is_mdu <= if_id_valid && id_is_mdu;
+          id_ex_mdu_op <= id_funct3;
           id_ex_imm <= id_imm;
           id_ex_rs1_data <= id_rs1_data;
           id_ex_rs2_data <= id_rs2_data;

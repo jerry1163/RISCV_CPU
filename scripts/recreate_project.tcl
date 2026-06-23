@@ -6,7 +6,7 @@
 set script_dir [file normalize [file dirname [info script]]]
 set repo_dir [file normalize [file join $script_dir ".."]]
 set project_name RISCV_FPGA
-set part_name xc7a100tfgg676-2
+set part_name xc7k325tffg900-2
 
 cd $repo_dir
 
@@ -20,10 +20,12 @@ add_files -norecurse [list \
   [file join $repo_dir RISCV_FPGA.srcs/sources_1/new/riscv_imm_gen.v] \
   [file join $repo_dir RISCV_FPGA.srcs/sources_1/new/riscv_inst_decode.v] \
   [file join $repo_dir RISCV_FPGA.srcs/sources_1/new/riscv_mcu_tdpram_top.v] \
+  [file join $repo_dir RISCV_FPGA.srcs/sources_1/new/riscv_mdu.v] \
   [file join $repo_dir RISCV_FPGA.srcs/sources_1/new/riscv_pc_gen.v] \
   [file join $repo_dir RISCV_FPGA.srcs/sources_1/new/riscv_reg_file.v] \
   [file join $repo_dir test6_tdp.coe] \
   [file join $repo_dir test7_tdp.coe] \
+  [file join $repo_dir test9.coe] \
 ]
 
 add_files -fileset constrs_1 -norecurse [list \
@@ -32,6 +34,7 @@ add_files -fileset constrs_1 -norecurse [list \
 
 add_files -fileset sim_1 -norecurse [list \
   [file join $repo_dir RISCV_FPGA.srcs/sim_1/new/riscv_mcu_top_tb.v] \
+  [file join $repo_dir RISCV_FPGA.srcs/sim_1/new/riscv_cpu_auto_tb.v] \
 ]
 
 add_files -norecurse [list \
@@ -40,7 +43,7 @@ add_files -norecurse [list \
 ]
 
 set_property top riscv_mcu_tdpram_top [current_fileset]
-set_property top riscv_mcu_top_tb [get_filesets sim_1]
+set_property top riscv_cpu_auto_tb [get_filesets sim_1]
 
 update_compile_order -fileset sources_1
 update_compile_order -fileset sim_1
@@ -51,4 +54,3 @@ foreach ip_name [get_ips] {
 }
 
 puts "Project recreated at: [file join $repo_dir ${project_name}.xpr]"
-
