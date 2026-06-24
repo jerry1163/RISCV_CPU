@@ -47,6 +47,7 @@ module riscv_cpu #(
     reg [bitwidth-1:0] pc = 0;
     reg [bitwidth-1:0] imem_resp_pc = 0;
     reg                imem_resp_valid = 0;
+    reg                redirect_fetch_advance = 0;
 
     // One-entry fetch buffer used when the ID stage stalls while the next
     // instruction has already returned from the synchronous instruction RAM.
@@ -116,6 +117,7 @@ module riscv_cpu #(
     reg                id_ex_mem_wr_en = 0;
     reg                id_ex_mem_rd_en = 0;
     reg [4:0]          id_ex_branch_opcode = 0;
+    reg                id_ex_pred_taken = 0;
     reg                id_ex_pc_gen_src = 0;
     reg [7:0]          id_ex_mem_byte_mask = 0;
     reg                id_ex_ld_unsigned = 0;
@@ -126,6 +128,11 @@ module riscv_cpu #(
     reg [bitwidth-1:0] id_ex_rs2_data = 0;
     reg [1:0]          id_ex_rs1_fwd_sel = FWD_NONE;
     reg [1:0]          id_ex_rs2_fwd_sel = FWD_NONE;
+
+    (* keep = "true", max_fanout = 16 *)
+    reg [1:0]          id_ex_branch_rs1_fwd_sel = FWD_NONE;
+    (* keep = "true", max_fanout = 16 *)
+    reg [1:0]          id_ex_branch_rs2_fwd_sel = FWD_NONE;
 
     // EX/MEM pipeline register. Load data arrives from the RAM during this
     // stage and is captured into MEM/WB on the next clock edge.
@@ -204,6 +211,22 @@ module riscv_cpu #(
     wire id_is_mdu =
       if_id_valid && (id_opcode == 7'b0110011) && (id_funct7 == 7'b0000001);
 
+    // 32-entry conditional branch predictor. A cold entry uses the test7-
+    // friendly static policy: forward taken, backward not taken.
+    reg [31:0] bht_valid = 32'd0;
+    reg [1:0]  bht_counter [0:31];
+    wire [4:0] id_bht_idx = if_id_pc[6:2];
+    wire       id_is_branch = if_id_valid && (id_opcode == 7'b1100011);
+    wire       id_is_jal = if_id_valid && (id_opcode == 7'b1101111);
+    wire       id_bht_hit = bht_valid[id_bht_idx];
+    wire       id_branch_pred_taken =
+      id_bht_hit ? bht_counter[id_bht_idx][1] : !id_imm[bitwidth-1];
+    wire       id_pred_taken =
+      id_is_jal || (id_is_branch && id_branch_pred_taken);
+    wire [bitwidth-1:0] id_pred_target = if_id_pc + id_imm;
+    wire       id_predict_request;
+    wire       id_predict_fire;
+
     wire mdu_start;
     wire mdu_busy;
     wire mdu_done;
@@ -249,6 +272,24 @@ module riscv_cpu #(
       endcase
     end
 
+    // Keep branch forwarding physically independent from the ALU/MDU muxes.
+    // This prevents the redirect path from inheriting the MDU input fanout.
+    (* keep = "true" *) reg [bitwidth-1:0] ex_branch_rs1_fwd;
+    (* keep = "true" *) reg [bitwidth-1:0] ex_branch_rs2_fwd;
+    always @(*) begin
+      case (id_ex_branch_rs1_fwd_sel)
+        FWD_EX_MEM: ex_branch_rs1_fwd = ex_mem_wb_data;
+        FWD_MEM_WB: ex_branch_rs1_fwd = mem_wb_wb_data;
+        default:    ex_branch_rs1_fwd = id_ex_rs1_data;
+      endcase
+
+      case (id_ex_branch_rs2_fwd_sel)
+        FWD_EX_MEM: ex_branch_rs2_fwd = ex_mem_wb_data;
+        FWD_MEM_WB: ex_branch_rs2_fwd = mem_wb_wb_data;
+        default:    ex_branch_rs2_fwd = id_ex_rs2_data;
+      endcase
+    end
+
     wire [bitwidth-1:0] ex_alu_din_b = id_ex_alu_src_b_is_imm ? id_ex_imm : ex_rs2_fwd;
     wire [bitwidth-1:0] ex_alu_dout;
     wire                ex_alu_zero_flag;
@@ -282,17 +323,17 @@ module riscv_cpu #(
 
     wire [bitwidth-1:0] ex_mem_addr_calc = ex_rs1_fwd + id_ex_imm;
 
-    wire signed [bitwidth-1:0] ex_rs1_signed = ex_rs1_fwd;
-    wire signed [bitwidth-1:0] ex_rs2_signed = ex_rs2_fwd;
+    wire signed [bitwidth-1:0] ex_branch_rs1_signed = ex_branch_rs1_fwd;
+    wire signed [bitwidth-1:0] ex_branch_rs2_signed = ex_branch_rs2_fwd;
     reg branch_taken;
     always @(*) begin
       case (id_ex_funct3)
-        3'b000: branch_taken = (ex_rs1_fwd == ex_rs2_fwd);       // beq
-        3'b001: branch_taken = (ex_rs1_fwd != ex_rs2_fwd);       // bne
-        3'b100: branch_taken = (ex_rs1_signed < ex_rs2_signed);  // blt
-        3'b101: branch_taken = (ex_rs1_signed >= ex_rs2_signed); // bge
-        3'b110: branch_taken = (ex_rs1_fwd < ex_rs2_fwd);        // bltu
-        3'b111: branch_taken = (ex_rs1_fwd >= ex_rs2_fwd);       // bgeu
+        3'b000: branch_taken = (ex_branch_rs1_fwd == ex_branch_rs2_fwd);
+        3'b001: branch_taken = (ex_branch_rs1_fwd != ex_branch_rs2_fwd);
+        3'b100: branch_taken = (ex_branch_rs1_signed < ex_branch_rs2_signed);
+        3'b101: branch_taken = (ex_branch_rs1_signed >= ex_branch_rs2_signed);
+        3'b110: branch_taken = (ex_branch_rs1_fwd < ex_branch_rs2_fwd);
+        3'b111: branch_taken = (ex_branch_rs1_fwd >= ex_branch_rs2_fwd);
         default: branch_taken = 1'b0;
       endcase
     end
@@ -300,11 +341,43 @@ module riscv_cpu #(
     wire ex_is_branch = id_ex_valid && (id_ex_branch_opcode[1:0] == 2'b01);
     wire ex_is_jal    = id_ex_valid && (id_ex_branch_opcode == 5'b00111);
     wire ex_is_jalr   = id_ex_valid && (id_ex_branch_opcode == 5'b00011);
-    wire ex_flush     = ex_is_jal || ex_is_jalr || (ex_is_branch && branch_taken);
 
     wire [bitwidth-1:0] ex_branch_target =
-      ex_is_jalr ? ((ex_rs1_fwd + id_ex_imm) & ~{{(bitwidth-1){1'b0}}, 1'b1}) :
+      ex_is_jalr ? ((ex_branch_rs1_fwd + id_ex_imm) & ~{{(bitwidth-1){1'b0}}, 1'b1}) :
                    (id_ex_pc + id_ex_imm);
+
+    wire ex_actual_taken =
+      ex_is_jal || ex_is_jalr || (ex_is_branch && branch_taken);
+    wire ex_is_control = ex_is_branch || ex_is_jal || ex_is_jalr;
+    wire ex_flush =
+      ex_is_control && (id_ex_pred_taken != ex_actual_taken);
+    wire [bitwidth-1:0] ex_recovery_target =
+      ex_actual_taken ? ex_branch_target : (id_ex_pc + 4);
+    // Recovery is intentionally slow: keeping EX resolution off the
+    // instruction RAM address path protects the common predicted path timing.
+    wire ex_fast_redirect = 1'b0;
+
+    assign id_predict_request =
+      id_pred_taken && !mdu_stall && !load_use_stall;
+    assign id_predict_fire = id_predict_request && !ex_flush;
+
+    // Conditional branches update the BHT when their real EX result is known.
+    always @(posedge clk or negedge rst_n) begin
+      if (!rst_n) begin
+        bht_valid <= 32'd0;
+      end
+      else if (ex_is_branch) begin
+        bht_valid[id_ex_pc[6:2]] <= 1'b1;
+        if (!bht_valid[id_ex_pc[6:2]])
+          bht_counter[id_ex_pc[6:2]] <= branch_taken ? 2'b10 : 2'b01;
+        else if (branch_taken) begin
+          if (bht_counter[id_ex_pc[6:2]] != 2'b11)
+            bht_counter[id_ex_pc[6:2]] <= bht_counter[id_ex_pc[6:2]] + 2'b01;
+        end
+        else if (bht_counter[id_ex_pc[6:2]] != 2'b00)
+          bht_counter[id_ex_pc[6:2]] <= bht_counter[id_ex_pc[6:2]] - 2'b01;
+      end
+    end
 
     reg [bitwidth-1:0] ex_wb_data;
     always @(*) begin
@@ -402,6 +475,7 @@ module riscv_cpu #(
         pc <= {bitwidth{1'b0}};
         imem_resp_pc <= {bitwidth{1'b0}};
         imem_resp_valid <= 1'b0;
+        redirect_fetch_advance <= 1'b0;
         fetch_buf_valid <= 1'b0;
         fetch_buf_pc <= {bitwidth{1'b0}};
         fetch_buf_inst <= 32'b0;
@@ -425,6 +499,7 @@ module riscv_cpu #(
         id_ex_mem_wr_en <= 1'b0;
         id_ex_mem_rd_en <= 1'b0;
         id_ex_branch_opcode <= 5'd0;
+        id_ex_pred_taken <= 1'b0;
         id_ex_pc_gen_src <= 1'b0;
         id_ex_mem_byte_mask <= 8'd0;
         id_ex_ld_unsigned <= 1'b0;
@@ -435,6 +510,8 @@ module riscv_cpu #(
         id_ex_rs2_data <= {bitwidth{1'b0}};
         id_ex_rs1_fwd_sel <= FWD_NONE;
         id_ex_rs2_fwd_sel <= FWD_NONE;
+        id_ex_branch_rs1_fwd_sel <= FWD_NONE;
+        id_ex_branch_rs2_fwd_sel <= FWD_NONE;
 
         ex_mem_valid <= 1'b0;
         ex_mem_rd_idx <= 5'd0;
@@ -472,9 +549,10 @@ module riscv_cpu #(
         ex_mem_wb_data <= ex_wb_data;
 
         if (ex_flush) begin
-          pc <= ex_branch_target;
-          imem_resp_pc <= pc;
-          imem_resp_valid <= 1'b0;
+          pc <= ex_recovery_target;
+          imem_resp_pc <= ex_fast_redirect ? ex_recovery_target : pc;
+          imem_resp_valid <= ex_fast_redirect;
+          redirect_fetch_advance <= ex_fast_redirect;
           fetch_buf_valid <= 1'b0;
 
           if_id_valid <= 1'b0;
@@ -484,10 +562,13 @@ module riscv_cpu #(
           id_ex_mem_wr_en <= 1'b0;
           id_ex_mem_rd_en <= 1'b0;
           id_ex_branch_opcode <= 5'd0;
+          id_ex_pred_taken <= 1'b0;
           id_ex_is_mdu <= 1'b0;
           id_ex_mdu_op <= 3'd0;
           id_ex_rs1_fwd_sel <= FWD_NONE;
           id_ex_rs2_fwd_sel <= FWD_NONE;
+          id_ex_branch_rs1_fwd_sel <= FWD_NONE;
+          id_ex_branch_rs2_fwd_sel <= FWD_NONE;
         end
         else if (mdu_stall) begin
           pc <= pc;
@@ -532,22 +613,36 @@ module riscv_cpu #(
           id_ex_mem_wr_en <= 1'b0;
           id_ex_mem_rd_en <= 1'b0;
           id_ex_branch_opcode <= 5'd0;
+          id_ex_pred_taken <= 1'b0;
           id_ex_is_mdu <= 1'b0;
           id_ex_mdu_op <= 3'd0;
           id_ex_rs1_fwd_sel <= FWD_NONE;
           id_ex_rs2_fwd_sel <= FWD_NONE;
+          id_ex_branch_rs1_fwd_sel <= FWD_NONE;
+          id_ex_branch_rs2_fwd_sel <= FWD_NONE;
         end
         else begin
-          pc <= pc + 4;
-          imem_resp_pc <= pc;
-          imem_resp_valid <= 1'b1;
-
-          if (fetch_buf_valid)
+          if (id_predict_request) begin
+            pc <= id_pred_target;
+            imem_resp_pc <= id_pred_target;
+            imem_resp_valid <= 1'b1;
+            redirect_fetch_advance <= 1'b1;
             fetch_buf_valid <= 1'b0;
+            if_id_valid <= 1'b0;
+          end
+          else begin
+            pc <= redirect_fetch_advance ? (pc + 8) : (pc + 4);
+            imem_resp_pc <= redirect_fetch_advance ? (pc + 4) : pc;
+            imem_resp_valid <= 1'b1;
+            redirect_fetch_advance <= 1'b0;
 
-          if_id_valid <= fetch_to_id_valid;
-          if_id_pc <= fetch_to_id_pc;
-          if_id_inst <= fetch_to_id_inst;
+            if (fetch_buf_valid)
+              fetch_buf_valid <= 1'b0;
+
+            if_id_valid <= fetch_to_id_valid;
+            if_id_pc <= fetch_to_id_pc;
+            if_id_inst <= fetch_to_id_inst;
+          end
 
           id_ex_valid <= if_id_valid;
           id_ex_pc <= if_id_pc;
@@ -564,6 +659,7 @@ module riscv_cpu #(
           id_ex_mem_wr_en <= if_id_valid && id_mem_wr_en;
           id_ex_mem_rd_en <= if_id_valid && id_mem_rd_en;
           id_ex_branch_opcode <= if_id_valid ? id_branch_opcode : 5'd0;
+          id_ex_pred_taken <= if_id_valid && id_pred_taken;
           id_ex_pc_gen_src <= id_pc_gen_src;
           id_ex_mem_byte_mask <= id_mem_byte_mask;
           id_ex_ld_unsigned <= id_ld_unsigned;
@@ -574,11 +670,22 @@ module riscv_cpu #(
           id_ex_rs2_data <= id_rs2_data;
           id_ex_rs1_fwd_sel <= id_rs1_fwd_sel_next;
           id_ex_rs2_fwd_sel <= id_rs2_fwd_sel_next;
+          id_ex_branch_rs1_fwd_sel <= id_rs1_fwd_sel_next;
+          id_ex_branch_rs2_fwd_sel <= id_rs2_fwd_sel_next;
         end
       end
     end
 
-    assign inst_bram_addr = pc;
+    // A taken redirect requests its target immediately. On the following
+    // cycle, pc still holds that target, so request target+4 before resuming
+    // the normal sequential request stream.
+    wire [bitwidth-1:0] predicted_or_sequential_addr =
+      id_predict_request ? id_pred_target :
+      (redirect_fetch_advance ? (pc + 4) : pc);
+
+    // A request sampled during EX recovery is discarded via imem_resp_valid,
+    // so the BRAM address does not need the late EX misprediction result.
+    assign inst_bram_addr = predicted_or_sequential_addr;
 
     assign data_bram_rd_en = id_ex_valid && id_ex_mem_rd_en;
     assign data_bram_wr_en = id_ex_valid && id_ex_mem_wr_en;

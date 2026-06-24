@@ -15,6 +15,10 @@ module riscv_cpu_auto_tb;
 `endif
 
     localparam integer MEM_WORDS = 32768;
+    localparam integer PREDICT_TAKEN_PENALTY_CYCLES = 1;
+    localparam integer FAST_FLUSH_PENALTY_CYCLES = 2;
+    localparam integer SLOW_FLUSH_PENALTY_CYCLES = 3;
+    localparam real CPU_FREQ_MHZ = 200.0;
 
     reg clk = 1'b0;
     reg rst_n = 1'b0;
@@ -39,6 +43,25 @@ module riscv_cpu_auto_tb;
     reg test_done = 1'b0;
     reg test_pass = 1'b0;
 
+    // Simulation-only performance counters. They freeze when the first halt
+    // instruction completes EX, so the checker drain cycles are not measured.
+    integer perf_cycles = 0;
+    integer perf_instructions = 0;
+    integer perf_load_use_stalls = 0;
+    integer perf_mdu_stall_cycles = 0;
+    integer perf_mdu_instructions = 0;
+    integer perf_flushes = 0;
+    integer perf_slow_flushes = 0;
+    integer perf_predicted_taken_redirects = 0;
+    integer perf_cond_predictions = 0;
+    integer perf_cond_mispredictions = 0;
+    integer perf_branch_instructions = 0;
+    integer perf_taken_branches = 0;
+    integer perf_jal_instructions = 0;
+    integer perf_jalr_instructions = 0;
+    integer perf_empty_ex_cycles = 0;
+    reg     perf_frozen = 1'b0;
+
     wire [31:0] dbg_pc = uut.pc;
     wire [31:0] dbg_x01 = uut.riscv_reg_file_inst.x[1];
     wire [31:0] dbg_x02 = uut.riscv_reg_file_inst.x[2];
@@ -59,6 +82,17 @@ module riscv_cpu_auto_tb;
     wire [31:0] dbg_x29 = uut.riscv_reg_file_inst.x[29];
     wire [31:0] dbg_x30 = uut.riscv_reg_file_inst.x[30];
     wire [31:0] dbg_x31 = uut.riscv_reg_file_inst.x[31];
+
+    wire perf_halt_in_ex =
+      uut.id_ex_valid &&
+      (uut.id_ex_pc == HALT_PC) &&
+      (uut.id_ex_inst == 32'h00000f6f);
+    wire perf_halt_in_id =
+      uut.if_id_valid &&
+      (uut.if_id_pc == HALT_PC) &&
+      (uut.if_id_inst == 32'h00000f6f);
+    wire perf_ex_instruction_complete =
+      uut.id_ex_valid && (!uut.id_ex_is_mdu || uut.mdu_done);
 
     assign inst = inst_r;
 
@@ -244,6 +278,64 @@ module riscv_cpu_auto_tb;
       end
     endtask
 
+    task report_performance;
+      integer control_cycles;
+      integer fast_flushes;
+      integer tracked_cycles;
+      integer residual_cycles;
+      real ipc;
+      real prediction_accuracy;
+      begin
+        fast_flushes = perf_flushes - perf_slow_flushes;
+        control_cycles =
+                         perf_predicted_taken_redirects * PREDICT_TAKEN_PENALTY_CYCLES +
+                         fast_flushes * FAST_FLUSH_PENALTY_CYCLES +
+                         perf_slow_flushes * SLOW_FLUSH_PENALTY_CYCLES;
+        tracked_cycles = perf_load_use_stalls +
+                         perf_mdu_stall_cycles +
+                         control_cycles;
+        residual_cycles = perf_cycles - perf_instructions - tracked_cycles;
+        ipc = (perf_cycles != 0) ?
+              (1.0 * perf_instructions / perf_cycles) : 0.0;
+        prediction_accuracy = (perf_cond_predictions != 0) ?
+          (100.0 * (perf_cond_predictions - perf_cond_mispredictions) /
+           perf_cond_predictions) : 100.0;
+
+        $display("PERF_BEGIN %0s", TEST_NAME);
+        $display("PERF cycles=%0d instructions=%0d IPC=%0.4f CPI=%0.4f throughput=%0.2f_MIPS",
+                 perf_cycles, perf_instructions, ipc,
+                 1.0 * perf_cycles / perf_instructions, ipc * CPU_FREQ_MHZ);
+        $display("PERF load_use_stall_cycles=%0d mdu_instructions=%0d mdu_stall_cycles=%0d predicted_taken_redirects=%0d",
+                 perf_load_use_stalls, perf_mdu_instructions, perf_mdu_stall_cycles,
+                 perf_predicted_taken_redirects);
+        $display("PERF branch_predictions=%0d branch_mispredictions=%0d prediction_accuracy=%0.2f%% fast_recoveries=%0d slow_recoveries=%0d control_penalty_cycles=%0d",
+                 perf_cond_predictions, perf_cond_mispredictions, prediction_accuracy,
+                 fast_flushes, perf_slow_flushes, control_cycles);
+        $display("PERF branches=%0d taken_branches=%0d jal=%0d jalr=%0d empty_ex_cycles=%0d residual_cycles=%0d",
+                 perf_branch_instructions, perf_taken_branches,
+                 perf_jal_instructions, perf_jalr_instructions,
+                 perf_empty_ex_cycles, residual_cycles);
+        $display("AMDAHL load_fraction=%0.4f max_speedup=%0.4f",
+                 1.0 * perf_load_use_stalls / perf_cycles,
+                 1.0 * perf_cycles / (perf_cycles - perf_load_use_stalls));
+        $display("AMDAHL control_fraction=%0.4f max_speedup=%0.4f prediction_zero_bubble_speedup=%0.4f",
+                 1.0 * control_cycles / perf_cycles,
+                 1.0 * perf_cycles / (perf_cycles - control_cycles),
+                 1.0 * perf_cycles /
+                   (perf_cycles - perf_predicted_taken_redirects));
+        $display("AMDAHL mdu_fraction=%0.4f max_speedup=%0.4f",
+                 1.0 * perf_mdu_stall_cycles / perf_cycles,
+                 1.0 * perf_cycles / (perf_cycles - perf_mdu_stall_cycles));
+        $display("AMDAHL startup_or_other_fraction=%0.4f max_speedup=%0.4f",
+                 1.0 * residual_cycles / perf_cycles,
+                 1.0 * perf_cycles / (perf_cycles - residual_cycles));
+        $display("AMDAHL all_tracked_penalties=%0d max_speedup=%0.4f",
+                 tracked_cycles,
+                 1.0 * perf_cycles / (perf_cycles - tracked_cycles));
+        $display("PERF_END %0s", TEST_NAME);
+      end
+    endtask
+
     always @(posedge clk) begin
       inst_r <= ram[inst_bram_addr[16:2]];
 
@@ -260,15 +352,51 @@ module riscv_cpu_auto_tb;
       if (rst_n) begin
         cycle <= cycle + 1;
 
+        if (!perf_frozen) begin
+          perf_cycles <= perf_cycles + 1;
+
+          if (perf_ex_instruction_complete)
+            perf_instructions <= perf_instructions + 1;
+          if (uut.load_use_stall)
+            perf_load_use_stalls <= perf_load_use_stalls + 1;
+          if (uut.mdu_stall)
+            perf_mdu_stall_cycles <= perf_mdu_stall_cycles + 1;
+          if (perf_ex_instruction_complete && uut.id_ex_is_mdu)
+            perf_mdu_instructions <= perf_mdu_instructions + 1;
+          if (uut.ex_flush && !perf_halt_in_ex)
+            perf_flushes <= perf_flushes + 1;
+          if (uut.ex_flush && !uut.ex_fast_redirect && !perf_halt_in_ex)
+            perf_slow_flushes <= perf_slow_flushes + 1;
+          if (uut.id_predict_fire && !perf_halt_in_id)
+            perf_predicted_taken_redirects <= perf_predicted_taken_redirects + 1;
+          if (!uut.id_ex_valid)
+            perf_empty_ex_cycles <= perf_empty_ex_cycles + 1;
+
+          if (perf_ex_instruction_complete && uut.ex_is_branch) begin
+            perf_cond_predictions <= perf_cond_predictions + 1;
+            if (uut.ex_flush)
+              perf_cond_mispredictions <= perf_cond_mispredictions + 1;
+            perf_branch_instructions <= perf_branch_instructions + 1;
+            if (uut.branch_taken)
+              perf_taken_branches <= perf_taken_branches + 1;
+          end
+          if (perf_ex_instruction_complete && uut.ex_is_jal)
+            perf_jal_instructions <= perf_jal_instructions + 1;
+          if (perf_ex_instruction_complete && uut.ex_is_jalr)
+            perf_jalr_instructions <= perf_jalr_instructions + 1;
+
+          if (perf_halt_in_ex)
+            perf_frozen <= 1'b1;
+        end
+
         if ((halt_seen == 0) &&
-            uut.id_ex_valid &&
-            (uut.id_ex_pc == HALT_PC) &&
-            (uut.id_ex_inst == 32'h00000f6f))
+            perf_halt_in_ex)
           halt_seen <= 1;
         else if (halt_seen != 0)
           halt_seen <= halt_seen + 1;
 
         if (!test_done && (halt_seen == 12)) begin
+          report_performance();
           run_checks();
           #20 $finish;
         end
